@@ -51,10 +51,15 @@ const MODULE_REQUIREMENTS = {
     "Active/inactive with effective period support.",
     "Change impact validation and audit trail."
   ],
-  "User & Role Management": [
-    "User/role CRUD with active task impact warnings.",
-    "User-level override higher than role-level permission.",
-    "Permission preview and full permission audit log."
+  "User Management": [
+    "User CRUD with department mapping and active/inactive controls.",
+    "User-level override permission preview before save.",
+    "User permission changes must be fully auditable."
+  ],
+  "Role Management": [
+    "Role CRUD with module-level and action-level permission scopes.",
+    "Role updates must show affected user count before publish.",
+    "Effective permission matrix must be previewable and auditable."
   ],
   "Delegation Management": [
     "HR/Admin and self-service delegation assignment.",
@@ -249,16 +254,26 @@ const BASE_SCREENS = [
   },
   {
     id: "SCR-991",
-    name: "User & Role Management",
-    module: "User & Role Management",
+    name: "User Management",
+    module: "User Management",
     group: "Administration",
-    type: "urm",
-    description: "Manage users, roles, departments, and effective permissions.",
-    requirements: ["REQ-URM-001", "REQ-URM-004", "REQ-URM-007", "REQ-URM-009", "REQ-URM-010"],
+    type: "user-management",
+    description: "Manage user accounts, department mapping, and effective permissions.",
+    requirements: ["REQ-URM-001", "REQ-URM-004", "REQ-URM-007", "REQ-URM-009"],
     roles: ["Admin"]
   },
   {
     id: "SCR-992",
+    name: "Role Management",
+    module: "Role Management",
+    group: "Administration",
+    type: "role-management",
+    description: "Manage role profiles, permission scope, and impacted user access.",
+    requirements: ["REQ-URM-002", "REQ-URM-003", "REQ-URM-005", "REQ-URM-010"],
+    roles: ["Admin"]
+  },
+  {
+    id: "SCR-993",
     name: "Delegation Management",
     module: "Delegation Management",
     group: "Administration",
@@ -268,7 +283,7 @@ const BASE_SCREENS = [
     roles: ["Admin", "Approver"]
   },
   {
-    id: "SCR-993",
+    id: "SCR-994",
     name: "LOV Management",
     module: "LOV Management",
     group: "Administration",
@@ -278,7 +293,7 @@ const BASE_SCREENS = [
     roles: ["Admin"]
   },
   {
-    id: "SCR-994",
+    id: "SCR-995",
     name: "Notification Center / Template",
     module: "Notification",
     group: "Administration",
@@ -331,7 +346,8 @@ const MASTERDATA_SCREEN_META = [
   ["SCR-915", "MASTER-Position", "Committee position and role references."],
   ["SCR-916", "MASTER-Reason Code", "Reason code values for return/cancel/archive actions."],
   ["SCR-917", "MASTER-Attachment Category", "Attachment category taxonomy for upload records."],
-  ["SCR-918", "MASTER-Integration Mapping Code", "Internal/external mapping codes for integrations."]
+  ["SCR-918", "MASTER-Integration Mapping Code", "Internal/external mapping codes for integrations."],
+  ["SCR-919", "MASTER-Department", "Department master data used for user ownership and access segmentation."]
 ];
 
 const REPORT_SCREENS = REPORT_SCREEN_META.map(([id, name, description]) => ({
@@ -397,6 +413,13 @@ const MOCK = {
     { user: "naris.k", role: "Requester", department: "Procurement", status: "Active" },
     { user: "audit.bot", role: "Auditor", department: "Audit", status: "Active" },
     { user: "vendor.alpha", role: "Vendor", department: "External", status: "Inactive" }
+  ],
+  roles: [
+    { role: "Admin", scope: "All Modules", users: 4, approvalLimit: "Unlimited", status: "Active" },
+    { role: "Approver", scope: "Task + Approval", users: 18, approvalLimit: "10,000,000", status: "Active" },
+    { role: "Requester", scope: "Project + Document Submit", users: 96, approvalLimit: "0", status: "Active" },
+    { role: "Auditor", scope: "Read-only + Audit Trail", users: 6, approvalLimit: "0", status: "Active" },
+    { role: "Vendor", scope: "External Task Only", users: 27, approvalLimit: "0", status: "Inactive" }
   ]
 };
 
@@ -404,14 +427,34 @@ const state = {
   role: localStorage.getItem("edoc-role") || "Admin",
   authenticated: localStorage.getItem("edoc-auth") !== "false",
   navQuery: "",
+  dashboardStatusFocus: "All",
+  dashboardReturnedFocus: "All",
+  dashboardWorkloadMode: "Role-Based",
+  dashboardTrendPeriod: "Week",
+  dashboardTrendDepartments: ["All"],
   projectSearch: "",
   taskSearch: "",
   workflowSearch: "",
   workflowStatus: "All",
   workflowSort: "newest",
+  workflowBuilderView: "board",
+  workflowSideTab: "documents",
+  workflowActiveModal: null,
+  workflowSelectedLine: null,
+  workflowConnectMode: false,
+  workflowConnectFrom: null,
+  workflowNodes: null,
+  workflowLines: null,
   approverSearch: "",
   approverStatus: "All",
   approverSort: "newest",
+  approverBuilderView: "board",
+  approverActiveModal: null,
+  approverSelectedLine: null,
+  approverConnectMode: false,
+  approverConnectFrom: null,
+  approverNodes: null,
+  approverLines: null,
   screenSearch: "",
   toastTimer: null
 };
@@ -558,14 +601,323 @@ function renderRequirementPanel(screen) {
   `;
 }
 
+function sumChartValues(items) {
+  return items.reduce((total, item) => total + (Number(item.value) || 0), 0);
+}
+
+function renderDonutGraphic(segments, centerValue, centerLabel) {
+  const positiveTotal = sumChartValues(segments);
+  const total = Math.max(positiveTotal, 1);
+  let startAngle = 0;
+  const stops = segments
+    .map((segment) => {
+      const size = ((Number(segment.value) || 0) / total) * 360;
+      const endAngle = startAngle + size;
+      const stop = `${segment.color} ${startAngle.toFixed(2)}deg ${endAngle.toFixed(2)}deg`;
+      startAngle = endAngle;
+      return stop;
+    })
+    .join(", ");
+  const gradient = positiveTotal > 0 ? `conic-gradient(${stops})` : "conic-gradient(#dbe7f4 0deg 360deg)";
+
+  return `
+    <div class="chart-donut" style="background:${gradient}">
+      <div class="chart-donut-core">
+        <strong>${escapeHtml(centerValue)}</strong>
+        <span>${escapeHtml(centerLabel)}</span>
+      </div>
+    </div>
+  `;
+}
+
+function renderBarMetricRows(items, maxValueOverride) {
+  const maxValue = maxValueOverride || Math.max(...items.map((item) => Number(item.value) || 0), 1);
+  return items
+    .map((item) => {
+      const value = Number(item.value) || 0;
+      const ratio = maxValue === 0 ? 0 : (value / maxValue) * 100;
+      const width = value > 0 ? Math.max(ratio, 6) : 0;
+      return `
+        <div class="chart-bar-row">
+          <span class="chart-bar-label">${escapeHtml(item.label)}</span>
+          <div class="chart-bar-track">
+            <span class="chart-bar-fill" style="width:${width.toFixed(1)}%;background:${escapeHtml(item.color)}"></span>
+          </div>
+          <span class="chart-bar-value">${escapeHtml(String(value))}</span>
+        </div>
+      `;
+    })
+    .join("");
+}
+
+function renderDocumentStackedRows(documents, statusOrder, colorByStatus, statusFocus) {
+  const maxFocused = Math.max(
+    ...documents.map((doc) => Number(doc.statuses[statusFocus]) || 0),
+    1
+  );
+  return documents
+    .map((doc) => {
+      const total = statusOrder.reduce((sum, status) => sum + (Number(doc.statuses[status]) || 0), 0);
+      const docName = escapeHtml(doc.name);
+
+      if (statusFocus !== "All") {
+        const focused = Number(doc.statuses[statusFocus]) || 0;
+        const ratio = (focused / maxFocused) * 100;
+        const width = focused > 0 ? Math.max(ratio, 6) : 0;
+        return `
+          <div class="stacked-row">
+            <div class="stacked-row-head">
+              <span>${docName}</span>
+              <span>${escapeHtml(String(focused))}</span>
+            </div>
+            <div class="stacked-track">
+              <span class="stacked-segment" style="width:${width.toFixed(1)}%;background:${escapeHtml(colorByStatus[statusFocus])}"></span>
+            </div>
+          </div>
+        `;
+      }
+
+      const segments = statusOrder
+        .map((status) => {
+          const value = Number(doc.statuses[status]) || 0;
+          if (value === 0 || total === 0) return "";
+          const ratio = (value / total) * 100;
+          const width = Math.max(ratio, 3);
+          return `<span class="stacked-segment" style="width:${width.toFixed(1)}%;background:${escapeHtml(colorByStatus[status])}" title="${escapeHtml(
+            `${status}: ${value}`
+          )}"></span>`;
+        })
+        .join("");
+
+      return `
+        <div class="stacked-row">
+          <div class="stacked-row-head">
+            <span>${docName}</span>
+            <span>${escapeHtml(String(total))}</span>
+          </div>
+          <div class="stacked-track">${segments}</div>
+        </div>
+      `;
+    })
+    .join("");
+}
+
+function renderLineChartSvg(labels, series) {
+  const width = 600;
+  const height = 240;
+  const padLeft = 38;
+  const padRight = 12;
+  const padTop = 16;
+  const padBottom = 30;
+  const maxValue = Math.max(1, ...series.flatMap((item) => item.values.map((value) => Number(value) || 0)));
+  const usableWidth = width - padLeft - padRight;
+  const usableHeight = height - padTop - padBottom;
+  const xStep = labels.length > 1 ? usableWidth / (labels.length - 1) : usableWidth;
+  const xPos = (index) => padLeft + xStep * index;
+  const yPos = (value) => padTop + usableHeight - ((Number(value) || 0) / maxValue) * usableHeight;
+
+  const gridLines = Array.from({ length: 5 }, (_, index) => {
+    const ratio = index / 4;
+    const y = padTop + ratio * usableHeight;
+    const label = Math.round(maxValue * (1 - ratio));
+    return `
+      <line x1="${padLeft}" y1="${y.toFixed(2)}" x2="${(width - padRight).toFixed(2)}" y2="${y.toFixed(2)}"></line>
+      <text x="${(padLeft - 8).toFixed(2)}" y="${(y + 4).toFixed(2)}">${label}</text>
+    `;
+  }).join("");
+
+  const xLabels = labels
+    .map(
+      (label, index) => `
+      <text x="${xPos(index).toFixed(2)}" y="${(height - 8).toFixed(2)}" text-anchor="middle">${escapeHtml(label)}</text>
+    `
+    )
+    .join("");
+
+  const seriesLines = series
+    .map((line) => {
+      const points = line.values
+        .map((value, index) => `${xPos(index).toFixed(2)},${yPos(value).toFixed(2)}`)
+        .join(" ");
+      const dots = line.values
+        .map(
+          (value, index) => `
+          <circle cx="${xPos(index).toFixed(2)}" cy="${yPos(value).toFixed(2)}" r="3"></circle>
+        `
+        )
+        .join("");
+
+      return `
+        <g class="line-series" style="--line-color:${escapeHtml(line.color)}">
+          <polyline points="${points}"></polyline>
+          ${dots}
+        </g>
+      `;
+    })
+    .join("");
+
+  const legend = series
+    .map(
+      (line) => `
+      <span class="line-legend-item">
+        <i style="background:${escapeHtml(line.color)}"></i>
+        ${escapeHtml(line.label)}
+      </span>
+    `
+    )
+    .join("");
+
+  return `
+    <div class="line-chart-wrap">
+      <svg class="line-chart-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="Performance trend line chart">
+        <g class="line-grid">${gridLines}</g>
+        <g class="line-series-wrap">${seriesLines}</g>
+        <g class="line-axis-labels">${xLabels}</g>
+      </svg>
+      <div class="line-legend">${legend}</div>
+    </div>
+  `;
+}
+
 function renderDashboard(screen) {
   const pending = MOCK.tasks.filter((task) => task.status === "Pending").length;
   const inReview = MOCK.tasks.filter((task) => task.status === "In Review").length;
   const completed = MOCK.tasks.filter((task) => task.status === "Completed").length;
   const returned = MOCK.tasks.filter((task) => task.status === "Returned").length;
+  const delegated = 2;
+  const dueToday = MOCK.tasks.filter((task) => task.due === "2026-05-24").length;
+  const overdue = 3;
+  const completedPercent = Math.round((completed / Math.max(MOCK.tasks.length, 1)) * 100);
+
+  const documentStatusSegments = [
+    { key: "Draft", value: 6, color: "#8f9bb2" },
+    { key: "Submitted", value: 8, color: "#1b9ddd" },
+    { key: "In Review", value: 10, color: "#1c7ec8" },
+    { key: "Returned", value: 4, color: "#de6b4d" },
+    { key: "Completed", value: 16, color: "#18a88d" },
+    { key: "Archived", value: 5, color: "#3f6f9b" }
+  ];
+  const statusOrder = documentStatusSegments.map((segment) => segment.key);
+  const colorByStatus = Object.fromEntries(documentStatusSegments.map((segment) => [segment.key, segment.color]));
+  const statusFocus = state.dashboardStatusFocus;
+  const totalDocuments = sumChartValues(documentStatusSegments);
+
+  const documents = [
+    { name: "TOR", statuses: { Draft: 1, Submitted: 2, "In Review": 2, Returned: 1, Completed: 3, Archived: 1 } },
+    { name: "PR", statuses: { Draft: 1, Submitted: 1, "In Review": 2, Returned: 1, Completed: 4, Archived: 1 } },
+    { name: "PO", statuses: { Draft: 1, Submitted: 1, "In Review": 3, Returned: 1, Completed: 3, Archived: 1 } },
+    { name: "Contract", statuses: { Draft: 2, Submitted: 2, "In Review": 2, Returned: 1, Completed: 2, Archived: 1 } },
+    { name: "Inspection", statuses: { Draft: 1, Submitted: 2, "In Review": 1, Returned: 0, Completed: 4, Archived: 1 } }
+  ];
+
+  const agingData = [
+    { label: "0-30 days", value: 14, color: "#1aa78f" },
+    { label: "31-90 days", value: 8, color: "#1a86ce" },
+    { label: "90+ days", value: 3, color: "#e27a56" }
+  ];
+
+  const ownDelegatedSegments = [
+    { key: "Own Task", value: 18, color: "#0c79bf" },
+    { key: "Delegated Task", value: 7, color: "#21b694" }
+  ];
+
+  const returnedSummary = [
+    {
+      reason: "Missing attachment",
+      items: [
+        { label: "TOR", value: 7, color: "#1b9ddd" },
+        { label: "PR", value: 4, color: "#61b8e8" },
+        { label: "Contract", value: 3, color: "#9ed5f2" },
+        { label: "Inspection", value: 2, color: "#d2ecfb" }
+      ]
+    },
+    {
+      reason: "Invalid fields",
+      items: [
+        { label: "PO", value: 6, color: "#ff9f66" },
+        { label: "Inspection", value: 3, color: "#ffc28f" },
+        { label: "TOR", value: 2, color: "#ffd9ba" },
+        { label: "Contract", value: 2, color: "#ffe8d6" }
+      ]
+    },
+    {
+      reason: "Budget mismatch",
+      items: [
+        { label: "PR", value: 5, color: "#8f7de1" },
+        { label: "PO", value: 3, color: "#b8abea" },
+        { label: "Contract", value: 1, color: "#d7cff4" },
+        { label: "TOR", value: 1, color: "#ebe4fb" }
+      ]
+    }
+  ];
+  const returnedFocus = state.dashboardReturnedFocus;
+
+  const workloadRoleData = [
+    { label: "Approver", value: 19, color: "#1b9ddd" },
+    { label: "Requester", value: 14, color: "#28b18f" },
+    { label: "Reviewer", value: 11, color: "#4e8fd4" },
+    { label: "Finance Lead", value: 8, color: "#7da9db" }
+  ];
+  const workloadDepartmentData = [
+    { label: "Procurement", value: 17, color: "#1b9ddd" },
+    { label: "Finance", value: 13, color: "#28b18f" },
+    { label: "PMO", value: 10, color: "#4e8fd4" },
+    { label: "Audit", value: 6, color: "#7da9db" }
+  ];
+  const workloadData = state.dashboardWorkloadMode === "Department-Based" ? workloadDepartmentData : workloadRoleData;
+
+  const trendByPeriod = {
+    Day: {
+      labels: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+      series: [
+        { label: "Submit Times", values: [14, 12, 15, 13, 16, 11, 10], color: "#1b9ddd" },
+        { label: "Approval Times", values: [10, 9, 11, 10, 12, 8, 7], color: "#21b694" },
+        { label: "Complete Times", values: [8, 7, 9, 8, 10, 7, 6], color: "#315f98" }
+      ]
+    },
+    Week: {
+      labels: ["W1", "W2", "W3", "W4", "W5", "W6"],
+      series: [
+        { label: "Submit Times", values: [12, 15, 14, 17, 16, 18], color: "#1b9ddd" },
+        { label: "Approval Times", values: [9, 11, 12, 13, 14, 15], color: "#21b694" },
+        { label: "Complete Times", values: [7, 9, 10, 11, 12, 14], color: "#315f98" }
+      ]
+    },
+    Month: {
+      labels: ["Jan", "Feb", "Mar", "Apr", "May", "Jun"],
+      series: [
+        { label: "Submit Times", values: [58, 63, 61, 67, 71, 74], color: "#1b9ddd" },
+        { label: "Approval Times", values: [44, 47, 48, 51, 55, 57], color: "#21b694" },
+        { label: "Complete Times", values: [39, 41, 43, 45, 49, 53], color: "#315f98" }
+      ]
+    }
+  };
+  const trendDepartmentWeights = {
+    Procurement: 1,
+    Finance: 0.86,
+    PMO: 0.72,
+    Audit: 0.58
+  };
+  const trendPeriod = trendByPeriod[state.dashboardTrendPeriod] ? state.dashboardTrendPeriod : "Week";
+  const trendDepartments =
+    Array.isArray(state.dashboardTrendDepartments) && state.dashboardTrendDepartments.length > 0
+      ? state.dashboardTrendDepartments
+      : ["All"];
+  const trendWeightList = trendDepartments.includes("All")
+    ? [1]
+    : trendDepartments.map((department) => trendDepartmentWeights[department]).filter((value) => Number.isFinite(value));
+  const trendFactor =
+    trendWeightList.length > 0
+      ? trendWeightList.reduce((sum, value) => sum + value, 0) / trendWeightList.length
+      : 1;
+  const performanceLabels = trendByPeriod[trendPeriod].labels;
+  const performanceSeries = trendByPeriod[trendPeriod].series.map((line) => ({
+    ...line,
+    values: line.values.map((value) => Math.max(1, Math.round(value * trendFactor)))
+  }));
 
   const rows = MOCK.tasks
-    .slice(0, 4)
+    .slice(0, 5)
     .map(
       (task) => `
       <tr>
@@ -580,37 +932,282 @@ function renderDashboard(screen) {
     )
     .join("");
 
+  const statusPills = ["All", ...statusOrder]
+    .map(
+      (status) => `
+      <button class="pill ${status === statusFocus ? "is-active" : ""}" data-status-focus="${escapeHtml(status)}">${escapeHtml(status)}</button>
+    `
+    )
+    .join("");
+
+  const documentLegend = documentStatusSegments
+    .map(
+      (segment) => `
+      <button class="chart-legend-row chart-legend-action ${segment.key === statusFocus ? "is-active" : ""}" data-status-focus="${escapeHtml(
+        segment.key
+      )}" type="button">
+        <span class="chart-dot" style="background:${escapeHtml(segment.color)}"></span>
+        <span>${escapeHtml(segment.key)}</span>
+        <strong>${escapeHtml(String(segment.value))}</strong>
+      </button>
+    `
+    )
+    .join("");
+
+  const ownDelegatedLegend = ownDelegatedSegments
+    .map(
+      (segment) => `
+      <div class="chart-legend-row">
+        <span class="chart-dot" style="background:${escapeHtml(segment.color)}"></span>
+        <span>${escapeHtml(segment.key)}</span>
+        <strong>${escapeHtml(String(segment.value))}</strong>
+      </div>
+    `
+    )
+    .join("");
+
+  const returnedSummaryMarkup = returnedSummary
+    .map((group) => {
+      const total = group.items.reduce((sum, item) => sum + item.value, 0);
+      const max = Math.max(...group.items.map((item) => item.value), 1);
+      const expanded = returnedFocus === group.reason;
+      const visibleItems = expanded ? group.items : group.items.slice(0, 3);
+      const hiddenCount = Math.max(group.items.length - visibleItems.length, 0);
+      return `
+        <section class="cluster-group ${expanded ? "is-expanded" : ""}">
+          <button class="cluster-head cluster-toggle" type="button" data-returned-focus="${escapeHtml(group.reason)}" aria-expanded="${expanded}">
+            <h4>${escapeHtml(group.reason)}</h4>
+            <span>${escapeHtml(String(total))} returns</span>
+          </button>
+          ${renderBarMetricRows(visibleItems, max)}
+          <p class="cluster-note">${
+            expanded
+              ? "Expanded view: showing all documents for this return reason."
+              : hiddenCount > 0
+                ? `Collapsed view: top 3 documents shown (+${hiddenCount} more).`
+                : "Collapsed view: all documents fit within top list."
+          }</p>
+        </section>
+      `;
+    })
+    .join("");
+  const returnedReasonPills = ["All", ...returnedSummary.map((group) => group.reason)]
+    .map(
+      (reason) => `
+      <button class="pill ${reason === returnedFocus ? "is-active" : ""}" data-returned-focus="${escapeHtml(reason)}">${escapeHtml(
+        reason === "All" ? "All Reasons" : reason
+      )}</button>
+    `
+    )
+    .join("");
+  const trendPeriodPills = ["Day", "Week", "Month"]
+    .map(
+      (period) => `
+      <button class="pill ${period === trendPeriod ? "is-active" : ""}" data-trend-period="${escapeHtml(period)}">${escapeHtml(period)}</button>
+    `
+    )
+    .join("");
+  const trendDepartmentPills = ["All", "Procurement", "Finance", "PMO", "Audit"]
+    .map(
+      (department) => `
+      <button class="pill ${trendDepartments.includes(department) ? "is-active" : ""}" data-trend-department="${escapeHtml(
+        department
+      )}">${escapeHtml(department === "All" ? "All Departments" : department)}</button>
+    `
+    )
+    .join("");
+
   return `
     <section class="content-grid">
       <div class="stack">
-        <article class="view-card">
-          <h3>My Workload</h3>
-          <div class="kpi-grid">
-            <div class="kpi"><p class="kpi-value">${pending}</p><p class="kpi-label">Pending Tasks</p></div>
-            <div class="kpi"><p class="kpi-value">${inReview}</p><p class="kpi-label">In Review</p></div>
-            <div class="kpi"><p class="kpi-value">${completed}</p><p class="kpi-label">Completed</p></div>
-            <div class="kpi"><p class="kpi-value">${returned}</p><p class="kpi-label">Returned</p></div>
-          </div>
-        </article>
+        <section class="dashboard-section">
+          <header class="dashboard-section-head">
+            <h2>Operational Dashboard Section</h2>
+            <p>Day-to-day document flow, approval execution, and task monitoring.</p>
+          </header>
 
-        <article class="view-card">
-          <h3>Recent Tasks</h3>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Task No</th>
-                  <th>Document</th>
-                  <th>Action</th>
-                  <th>Assignee</th>
-                  <th>Due</th>
-                  <th>Status</th>
-                </tr>
-              </thead>
-              <tbody>${rows}</tbody>
-            </table>
-          </div>
-        </article>
+          <article class="view-card">
+            <h3>My Pending Task KPI Cards</h3>
+            <div class="kpi-grid">
+              <button class="kpi kpi-action-card" type="button" data-go="SCR-021">
+                <p class="kpi-value">${escapeHtml(String(pending))}</p>
+                <p class="kpi-label">Own Pending</p>
+                <span class="kpi-hint">Drill to Task Center</span>
+              </button>
+              <button class="kpi kpi-action-card" type="button" data-go="SCR-021">
+                <p class="kpi-value">${escapeHtml(String(delegated))}</p>
+                <p class="kpi-label">Delegated Pending</p>
+                <span class="kpi-hint">Drill to Task Center</span>
+              </button>
+              <button class="kpi kpi-action-card" type="button" data-go="SCR-021">
+                <p class="kpi-value">${escapeHtml(String(overdue))}</p>
+                <p class="kpi-label">Overdue Tasks</p>
+                <span class="kpi-hint">Drill to Pending Approval / Task</span>
+              </button>
+              <button class="kpi kpi-action-card" type="button" data-go="SCR-021">
+                <p class="kpi-value">${escapeHtml(String(dueToday))}</p>
+                <p class="kpi-label">Due Today</p>
+                <span class="kpi-hint">Drill to task queue</span>
+              </button>
+            </div>
+          </article>
+
+          <article class="view-card">
+            <h3>My Document Status Cards</h3>
+            <div class="kpi-grid">
+              ${documentStatusSegments
+                .map(
+                  (segment) => `
+                <button class="kpi kpi-action-card" type="button" data-status-focus="${escapeHtml(segment.key)}">
+                  <p class="kpi-value">${escapeHtml(String(segment.value))}</p>
+                  <p class="kpi-label">${escapeHtml(segment.key)}</p>
+                  <span class="kpi-hint">Drill dashboard status split</span>
+                </button>
+              `
+                )
+                .join("")}
+            </div>
+          </article>
+
+          <section class="dashboard-chart-grid">
+            <article class="view-card chart-card">
+              <h3>Document Summary by Status</h3>
+              <div class="chart-toolbar">
+                <span class="chart-toolbar-label">Status Focus</span>
+                <div class="pill-row chart-pill-row">${statusPills}</div>
+              </div>
+              <div class="donut-layout">
+                ${renderDonutGraphic(documentStatusSegments, String(totalDocuments), "Documents")}
+                <div class="chart-legend">${documentLegend}</div>
+              </div>
+              <p class="mini-note">Drilldown: click a status chip or legend row to focus document split by that status.</p>
+              <div class="stacked-list">
+                ${renderDocumentStackedRows(documents, statusOrder, colorByStatus, statusFocus)}
+              </div>
+            </article>
+
+            <article class="view-card chart-card">
+              <h3>Pending Approval Aging Chart</h3>
+              <div class="chart-bars">
+                ${renderBarMetricRows(agingData)}
+              </div>
+            </article>
+
+            <article class="view-card chart-card">
+              <h3>Own / Delegated Task Donut</h3>
+              <div class="donut-layout">
+                ${renderDonutGraphic(ownDelegatedSegments, "25", "Task Pool")}
+                <div class="chart-legend">${ownDelegatedLegend}</div>
+              </div>
+            </article>
+
+            <article class="view-card chart-card">
+              <h3>Returned Summary</h3>
+              <div class="chart-toolbar">
+                <span class="chart-toolbar-label">Reason Drilldown</span>
+                <div class="pill-row chart-pill-row">${returnedReasonPills}</div>
+              </div>
+              <div class="cluster-wrap">
+                ${returnedSummaryMarkup}
+              </div>
+              <p class="mini-note">Click a return reason to expand all document types under that reason. Other reasons collapse automatically.</p>
+            </article>
+          </section>
+
+          <article class="view-card">
+            <h3>Recent Tasks</h3>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Task No</th>
+                    <th>Document</th>
+                    <th>Action</th>
+                    <th>Assignee</th>
+                    <th>Due</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>${rows}</tbody>
+              </table>
+            </div>
+          </article>
+        </section>
+
+        <section class="dashboard-section">
+          <header class="dashboard-section-head">
+            <h2>Management Dashboard Section</h2>
+            <p>Executive-level workload balance, trend signals, and portfolio outcome metrics.</p>
+          </header>
+
+          <article class="view-card">
+            <h3>Executive KPI Cards</h3>
+            <div class="kpi-grid">
+              <button class="kpi kpi-action-card" type="button" data-go="SCR-011">
+                <p class="kpi-value">${escapeHtml(String(MOCK.projects.length))}</p>
+                <p class="kpi-label">Total Projects</p>
+                <span class="kpi-hint">Drill to Project List</span>
+              </button>
+              <button class="kpi kpi-action-card" type="button" data-go="SCR-803">
+                <p class="kpi-value">${escapeHtml(String(totalDocuments))}</p>
+                <p class="kpi-label">Total Documents</p>
+                <span class="kpi-hint">Drill to Document Status Report</span>
+              </button>
+              <button class="kpi kpi-action-card" type="button" data-go="SCR-804">
+                <p class="kpi-value">${escapeHtml(String(inReview))}</p>
+                <p class="kpi-label">In Review</p>
+                <span class="kpi-hint">Drill to Pending Approval Report</span>
+              </button>
+              <button class="kpi kpi-action-card" type="button" data-go="SCR-805">
+                <p class="kpi-value">${escapeHtml(String(returned))}</p>
+                <p class="kpi-label">Returned</p>
+                <span class="kpi-hint">Drill to Returned / Revision Report</span>
+              </button>
+              <button class="kpi kpi-action-card" type="button" data-go="SCR-800">
+                <p class="kpi-value">${escapeHtml(String(completedPercent))}%</p>
+                <p class="kpi-label">Completion Rate</p>
+                <span class="kpi-hint">Drill to Report Center</span>
+              </button>
+              <button class="kpi kpi-action-card" type="button" data-go="SCR-800">
+                <p class="kpi-value">${escapeHtml(String(completed))}</p>
+                <p class="kpi-label">Completed Tasks</p>
+                <span class="kpi-hint">Drill to executive reports</span>
+              </button>
+            </div>
+          </article>
+
+          <section class="dashboard-chart-grid">
+            <article class="view-card chart-card">
+              <h3>Workload</h3>
+              <div class="chart-toolbar">
+                <span class="chart-toolbar-label">Based</span>
+                <div class="pill-row chart-pill-row">
+                  <button class="pill ${state.dashboardWorkloadMode === "Role-Based" ? "is-active" : ""}" data-workload-mode="Role-Based">Role-Based</button>
+                  <button class="pill ${state.dashboardWorkloadMode === "Department-Based" ? "is-active" : ""}" data-workload-mode="Department-Based">Department-Based</button>
+                </div>
+              </div>
+              <div class="chart-bars">
+                ${renderBarMetricRows(workloadData)}
+              </div>
+            </article>
+
+            <article class="view-card chart-card">
+              <h3>Performance Trend Line</h3>
+              <div class="chart-toolbar chart-toolbar-stack">
+                <div class="chart-toolbar-group">
+                  <span class="chart-toolbar-label">Time Period</span>
+                  <div class="pill-row chart-pill-row">${trendPeriodPills}</div>
+                </div>
+                <div class="chart-toolbar-group">
+                  <span class="chart-toolbar-label">Departments</span>
+                  <div class="pill-row chart-pill-row">${trendDepartmentPills}</div>
+                </div>
+              </div>
+              ${renderLineChartSvg(performanceLabels, performanceSeries)}
+              <p class="mini-note">Multi-select departments for trend comparison. Values aggregate by selected departments.</p>
+            </article>
+          </section>
+        </section>
       </div>
       ${renderRequirementPanel(screen)}
     </section>
@@ -957,42 +1554,152 @@ function renderCards(items) {
 function renderWorkflowList(screen) {
   const status = state.workflowStatus;
   const query = state.workflowSearch.toLowerCase().trim();
-  const sorted = sortCards(MOCK.workflowCards, state.workflowSort);
+  const baseRows = [
+    {
+      name: "กระบวนการจัดซื้อจัดจ้าง",
+      statusForFilter: "Published",
+      statusMeta: "Instance : 142",
+      owner: "Tamako",
+      updatedText: "Updated 2 hours ago",
+      date: "2026-05-23"
+    },
+    {
+      name: "ขออนุมัติเดินทางไปปฏิบัติงาน",
+      statusForFilter: "Draft",
+      statusMeta: "Not yet officially activated.",
+      owner: "Tamako",
+      updatedText: "Updated 2 hours ago",
+      date: "2026-05-22"
+    }
+  ];
+
+  const sorted = [...baseRows].sort((a, b) => {
+    if (state.workflowSort === "name") return a.name.localeCompare(b.name);
+    const ta = new Date(a.date).getTime();
+    const tb = new Date(b.date).getTime();
+    return state.workflowSort === "oldest" ? ta - tb : tb - ta;
+  });
+
   const visible = sorted.filter((item) => {
-    const statusOk = status === "All" || item.status === status;
+    const statusOk = status === "All" || item.statusForFilter === status;
     if (!statusOk) return false;
     if (!query) return true;
-    return `${item.name} ${item.status} ${item.editor}`.toLowerCase().includes(query);
+    return `${item.name} ${item.statusForFilter} ${item.owner} ${item.statusMeta}`.toLowerCase().includes(query);
   });
+
+  const statusTabs = ["All", "Published", "Draft", "Archived"]
+    .map(
+      (tab) => `
+      <button class="workflow-status-tab ${state.workflowStatus === tab ? "is-active" : ""}" data-status="${escapeHtml(tab)}">${escapeHtml(tab)}</button>
+    `
+    )
+    .join("");
+
+  const rows = visible
+    .map((item) => {
+      const badgeClass =
+        item.statusForFilter === "Published"
+          ? "is-published"
+          : item.statusForFilter === "Draft"
+            ? "is-draft"
+            : "is-archived";
+
+      return `
+        <article class="workflow201-row-card">
+          <div class="workflow201-row-main">
+            <h4>${escapeHtml(item.name)}</h4>
+          </div>
+          <div class="workflow201-row-status">
+            <span class="workflow201-row-badge ${badgeClass}">
+              <i aria-hidden="true">${item.statusForFilter === "Published" ? "●" : "◌"}</i>
+              ${escapeHtml(item.statusForFilter)}
+            </span>
+            <span>${escapeHtml(item.statusMeta)}</span>
+          </div>
+          <div class="workflow201-row-owner">
+            <div>
+              <strong>${escapeHtml(item.owner)}</strong>
+              <p>${escapeHtml(item.updatedText)}</p>
+            </div>
+          </div>
+          <div class="workflow201-row-actions">
+            <button data-go="SCR-203" title="Edit workflow" aria-label="Edit workflow">
+              <svg class="wf201-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M4 20h4l10-10-4-4L4 16v4zm3-2H6v-1l8-8 1 1-8 8zM15 4l4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
+              </svg>
+            </button>
+            <button data-toast="Workflow duplicated to draft" title="Duplicate workflow" aria-label="Duplicate workflow">
+              <svg class="wf201-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="8" y="7" width="10" height="13" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"></rect>
+                <rect x="4" y="3" width="10" height="13" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"></rect>
+              </svg>
+            </button>
+            <button data-toast="Workflow more options opened" title="More options" aria-label="More options">
+              <svg class="wf201-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="12" cy="5" r="1.8" fill="currentColor"></circle>
+                <circle cx="12" cy="12" r="1.8" fill="currentColor"></circle>
+                <circle cx="12" cy="19" r="1.8" fill="currentColor"></circle>
+              </svg>
+            </button>
+          </div>
+        </article>
+      `;
+    })
+    .join("");
 
   return `
     <section class="content-grid">
       <div class="stack">
-        <article class="view-card">
-          <h3>Workflow Management</h3>
-          <div class="toolbar compact">
-            <label>Search
-              <input id="workflowSearch" type="search" placeholder="Search workflow name" value="${escapeHtml(state.workflowSearch)}">
-            </label>
-            <label>Sort
-              <select id="workflowSort">
-                <option value="newest" ${state.workflowSort === "newest" ? "selected" : ""}>Newest</option>
-                <option value="oldest" ${state.workflowSort === "oldest" ? "selected" : ""}>Oldest</option>
-                <option value="name" ${state.workflowSort === "name" ? "selected" : ""}>A-Z</option>
-              </select>
-            </label>
-            <button class="btn-primary" data-go="SCR-202">+ New Workflow</button>
+        <article class="view-card workflow201-body-card">
+          <div class="workflow201-body-inner">
+            <header class="workflow201-hero">
+              <div>
+                <h2>Workflow Management</h2>
+                <p>Customize and Manage Your Approval Workflows</p>
+              </div>
+              <button class="workflow201-create-btn" data-go="SCR-202">
+                <svg class="wf201-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M7 3h7l5 5v13H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"></path>
+                  <path d="M14 3v5h5M12 12v6M9 15h6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
+                </svg>
+                Create Workflow
+              </button>
+            </header>
+
+            <div class="workflow201-tab-row" id="workflowStatusPills">${statusTabs}</div>
+            <article class="workflow201-board">
+              <div class="workflow201-tools">
+                <label class="workflow201-search-box">
+                  <svg class="wf201-icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="1.8"></circle>
+                    <path d="m16.2 16.2 3.8 3.8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
+                  </svg>
+                  <input id="workflowSearch" type="search" placeholder="Search..." value="${escapeHtml(state.workflowSearch)}">
+                </label>
+                <label class="workflow201-sort-box">
+                  <svg class="wf201-icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M8 4v15m0 0-3-3m3 3 3-3M16 20V5m0 0-3 3m3-3 3 3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
+                  </svg>
+                  <span>Sort by : </span>
+                  <select id="workflowSort">
+                    <option value="newest" ${state.workflowSort === "newest" ? "selected" : ""}>Latest</option>
+                    <option value="oldest" ${state.workflowSort === "oldest" ? "selected" : ""}>Oldest</option>
+                    <option value="name" ${state.workflowSort === "name" ? "selected" : ""}>A-Z</option>
+                  </select>
+                </label>
+              </div>
+
+              <div class="workflow201-row-list">
+                ${rows || `<p class="workflow201-empty">No workflows matched your filters.</p>`}
+              </div>
+            </article>
           </div>
-          ${renderStatusPills("workflowStatusPills", state.workflowStatus, ["All", "Published", "Draft", "On Review"])}
-          <p class="mini-note">${visible.length} workflow cards visible.</p>
-          <div class="card-grid">${renderCards(visible)}</div>
         </article>
       </div>
       ${renderRequirementPanel(screen)}
     </section>
   `;
 }
-
 function renderWorkflowRoot(screen) {
   return `
     <section class="content-grid">
@@ -1030,12 +1737,186 @@ function renderWorkflowRoot(screen) {
   `;
 }
 
-function renderWorkflowBuilder(screen) {
+function ensureWorkflowBuilderState() {
+  if (!Array.isArray(state.workflowNodes)) {
+    state.workflowNodes = [
+      { id: "start", type: "start", label: "Start", x: 230, y: 24, w: 100, h: 38 },
+      { id: "doc-pr", type: "document", code: "DOC-0002", label: "Create PR", x: 200, y: 100, w: 150, h: 52 },
+      { id: "amount", type: "condition", label: "Amount", x: 216, y: 205, w: 118, h: 82 },
+      { id: "gm", type: "approval", label: "GM Approve", x: 70, y: 345, w: 130, h: 54 },
+      { id: "exec", type: "approval", label: "Exec Approve", x: 360, y: 345, w: 136, h: 54 },
+      { id: "end", type: "end", label: "End", x: 230, y: 455, w: 100, h: 38 }
+    ];
+  }
+
+  if (!Array.isArray(state.workflowLines)) {
+    state.workflowLines = [
+      { id: "line-start-pr", from: "start", to: "doc-pr", label: "", type: "then" },
+      { id: "line-pr-amount", from: "doc-pr", to: "amount", label: "", type: "then" },
+      { id: "line-amount-gm", from: "amount", to: "gm", label: "< 500k", type: "if" },
+      { id: "line-amount-exec", from: "amount", to: "exec", label: ">= 500k", type: "if" },
+      { id: "line-gm-end", from: "gm", to: "end", label: "approved", type: "then" },
+      { id: "line-exec-end", from: "exec", to: "end", label: "approved", type: "then" }
+    ];
+  }
+
+  if (state.workflowBuilderView === "alt") state.workflowBuilderView = "board";
+  if (state.workflowBuilderView === "legacy") state.workflowBuilderView = "table";
+  if (!state.workflowBuilderView) state.workflowBuilderView = "board";
+  if (!state.workflowSideTab) state.workflowSideTab = "documents";
+  if (typeof state.workflowConnectMode !== "boolean") state.workflowConnectMode = false;
+}
+
+function getWorkflowLinePoints(line, nodesById) {
+  const source = nodesById[line.from];
+  const target = nodesById[line.to];
+  if (!source || !target) return null;
+
+  const sourceCenterX = source.x + source.w / 2;
+  const sourceCenterY = source.y + source.h / 2;
+  const targetCenterX = target.x + target.w / 2;
+  const targetCenterY = target.y + target.h / 2;
+  const horizontal = Math.abs(targetCenterX - sourceCenterX) > Math.abs(targetCenterY - sourceCenterY);
+
+  let sx = sourceCenterX;
+  let sy = targetCenterY >= sourceCenterY ? source.y + source.h : source.y;
+  let tx = targetCenterX;
+  let ty = targetCenterY >= sourceCenterY ? target.y : target.y + target.h;
+
+  if (horizontal) {
+    sx = targetCenterX >= sourceCenterX ? source.x + source.w : source.x;
+    sy = sourceCenterY;
+    tx = targetCenterX >= sourceCenterX ? target.x : target.x + target.w;
+    ty = targetCenterY;
+  }
+
+  const midY = sy + (ty - sy) / 2;
+  const midX = sx + (tx - sx) / 2;
+  const points = horizontal
+    ? `${sx},${sy} ${midX},${sy} ${midX},${ty} ${tx},${ty}`
+    : `${sx},${sy} ${sx},${midY} ${tx},${midY} ${tx},${ty}`;
+
+  return { points, labelX: midX, labelY: midY };
+}
+
+function renderWorkflowModal() {
+  if (!state.workflowActiveModal) return "";
+
+  const selectedLine = (state.workflowLines || []).find((line) => line.id === state.workflowSelectedLine) || state.workflowLines?.[0];
+  const modalContent = {
+    save: {
+      title: "Save Workflow Draft",
+      body: `
+        <p>Save the current board positions, document steps, connector labels, and table mapping as a draft version.</p>
+        <div class="wf203-summary-grid">
+          <span>Version</span><strong>v3 Draft</strong>
+          <span>Changed blocks</span><strong>${state.workflowNodes.length}</strong>
+          <span>Connectors</span><strong>${state.workflowLines.length}</strong>
+        </div>
+      `,
+      action: "Save Draft"
+    },
+    publish: {
+      title: "Publish Workflow",
+      body: `
+        <p>Publish this workflow version after validation. Published workflow versions become available for new project routing.</p>
+        <label class="wf203-check"><input type="checkbox" checked> Run overlap validation before publish</label>
+        <label class="wf203-check"><input type="checkbox" checked> Freeze published document-core mapping</label>
+      `,
+      action: "Publish"
+    },
+    unpublish: {
+      title: "Unpublish Workflow",
+      body: `<p>Move the active workflow out of production. Existing instances keep their current version.</p>`,
+      action: "Unpublish"
+    },
+    delete: {
+      title: "Delete Draft Workflow",
+      body: `<p>Delete this draft version and keep the latest published workflow untouched.</p><label>Reason<textarea>Duplicate draft created during workflow review.</textarea></label>`,
+      action: "Delete Draft"
+    },
+    validate: {
+      title: "Simulation Result",
+      body: `
+        <ul class="wf203-modal-list">
+          <li>All required document cores are connected.</li>
+          <li>Amount condition has two outbound paths.</li>
+          <li>No unreachable block detected.</li>
+        </ul>
+      `,
+      action: "Close"
+    },
+    document: {
+      title: "Document Block Setup",
+      body: `
+        <div class="form-grid">
+          <label>Document Core<select><option>DOC-0002 - PR</option><option>DOC-0001 - TOR</option><option>DOC-0003 - PO</option></select></label>
+          <label>Step Mode<select><option>Sequential</option><option>Parallel</option><option>Alternative</option></select></label>
+          <label>Approver Flow<select><option>AF Procurement Committee</option><option>AF Finance Resolver</option></select></label>
+          <label>Required<select><option>Yes</option><option>No</option></select></label>
+        </div>
+      `,
+      action: "Apply"
+    },
+    logic: {
+      title: "Connector Logic",
+      body: `
+        <div class="wf203-line-context">${escapeHtml(selectedLine?.from || "source")} -> ${escapeHtml(selectedLine?.to || "target")}</div>
+        <div class="form-grid">
+          <label>Connector Type<select><option ${selectedLine?.type === "if" ? "selected" : ""}>IF</option><option>THEN</option><option>AND</option><option>OR</option><option>ELSE</option></select></label>
+          <label>Field<select><option>Project budget amount</option><option>Document status</option><option>Department</option></select></label>
+          <label>Operator<select><option>>=</option><option><</option><option>=</option><option>contains</option></select></label>
+          <label>Value<input type="text" value="${escapeHtml(selectedLine?.label || "approved")}"></label>
+        </div>
+      `,
+      action: "Apply Logic"
+    },
+    close: {
+      title: "Close Builder",
+      body: `<p>There are unsaved board changes. Choose whether to save the draft before leaving the builder.</p>`,
+      action: "Save and Close"
+    }
+  };
+
+  const current = modalContent[state.workflowActiveModal] || modalContent.save;
   return `
+    <div class="wf203-modal-backdrop" role="presentation">
+      <section class="wf203-modal" role="dialog" aria-modal="true" aria-label="${escapeHtml(current.title)}">
+        <header>
+          <h4>${escapeHtml(current.title)}</h4>
+          <button data-wf203-close-modal aria-label="Close modal">x</button>
+        </header>
+        <div class="wf203-modal-body">${current.body}</div>
+        <footer>
+          <button data-wf203-close-modal>Cancel</button>
+          <button class="btn-primary" data-wf203-close-modal data-toast="${escapeHtml(current.action)} completed">${escapeHtml(current.action)}</button>
+        </footer>
+      </section>
+    </div>
+  `;
+}
+
+function renderWorkflowBuilder(screen) {
+  ensureWorkflowBuilderState();
+  const currentView = state.workflowBuilderView === "table" ? "table" : "board";
+  const switcher = `
+    <div class="wf203-switcher">
+      <button class="${currentView === "board" ? "is-active" : ""}" data-workflow-builder-view="board">Board View</button>
+      <button class="${currentView === "table" ? "is-active" : ""}" data-workflow-builder-view="table">Table View</button>
+    </div>
+  `;
+
+  const tableMarkup = `
     <section class="content-grid">
       <div class="stack">
-        <article class="view-card">
-          <h3>Workflow Step Builder</h3>
+        <article class="view-card wf203-card">
+          <div class="wf203-topbar">
+            <div>
+              <h3>Builds Workflow</h3>
+              <p>Inactive workflow</p>
+            </div>
+            ${switcher}
+          </div>
           <div class="table-wrap">
             <table>
               <thead>
@@ -1057,21 +1938,175 @@ function renderWorkflowBuilder(screen) {
             </table>
           </div>
           <div class="action-row">
-            <button data-toast="Step added">+ Add Step</button>
-            <button data-toast="Simulation completed">Run Simulation</button>
-            <button class="btn-primary" data-toast="Workflow published">Publish</button>
+            <button data-wf203-modal="document">+ Add Step</button>
+            <button data-wf203-modal="validate">Run Simulation</button>
+            <button class="btn-primary" data-wf203-modal="publish">Publish</button>
           </div>
         </article>
       </div>
       ${renderRequirementPanel(screen)}
     </section>
   `;
-}
 
+  if (currentView === "table") return tableMarkup;
+
+  const nodesById = Object.fromEntries(state.workflowNodes.map((node) => [node.id, node]));
+  const lines = state.workflowLines
+    .map((line) => {
+      const linePoints = getWorkflowLinePoints(line, nodesById);
+      if (!linePoints) return "";
+      return `
+        <g class="wf203-line-group ${state.workflowSelectedLine === line.id ? "is-selected" : ""}" data-line-id="${escapeHtml(line.id)}">
+          <polyline class="wf203-line-hit" points="${linePoints.points}" data-wf203-line="${escapeHtml(line.id)}"></polyline>
+          <polyline class="wf203-line" points="${linePoints.points}" marker-end="url(#wf203Arrow)"></polyline>
+          ${line.label ? `<text x="${linePoints.labelX}" y="${linePoints.labelY - 8}" text-anchor="middle">${escapeHtml(line.label)}</text>` : ""}
+        </g>
+      `;
+    })
+    .join("");
+
+  const lineHotspots = state.workflowLines
+    .map((line) => {
+      const linePoints = getWorkflowLinePoints(line, nodesById);
+      if (!linePoints) return "";
+      return `
+        <button
+          class="wf203-line-hotspot"
+          style="left:${linePoints.labelX}px; top:${linePoints.labelY}px"
+          data-line-hotspot="${escapeHtml(line.id)}"
+          data-wf203-line="${escapeHtml(line.id)}"
+          aria-label="Open connector logic"
+          type="button"></button>
+      `;
+    })
+    .join("");
+
+  const nodes = state.workflowNodes
+    .map(
+      (node) => `
+        <button class="wf203-node is-${escapeHtml(node.type)} ${state.workflowConnectFrom === node.id ? "is-connecting" : ""}"
+          style="left:${node.x}px; top:${node.y}px; width:${node.w}px; height:${node.h}px"
+          data-wf203-node="${escapeHtml(node.id)}"
+          type="button">
+          <span>${escapeHtml(node.label)}</span>
+          ${node.code ? `<small>${escapeHtml(node.code)}</small>` : ""}
+        </button>
+      `
+    )
+    .join("");
+
+  const documentCores = [
+    ["DOC-0001", "TOR", "Procurement"],
+    ["DOC-0002", "PR", "Purchase Request"],
+    ["DOC-0003", "PO", "Purchase Order"],
+    ["DOC-0004", "Contract", "Legal"],
+    ["DOC-0005", "Inspection", "Committee"],
+    ["DOC-0006", "Payment", "Finance"]
+  ];
+
+  return `
+    <section class="content-grid">
+      <div class="stack">
+        <article class="view-card wf203-card">
+          <div class="wf203-topbar">
+            <div>
+              <h3>Builds Workflow</h3>
+              <p>Inactive workflow</p>
+            </div>
+            ${switcher}
+            <div class="wf203-actions">
+              <button data-wf203-modal="save">Save</button>
+              <button data-wf203-modal="publish">Publish</button>
+              <button data-wf203-modal="unpublish">Unpublish</button>
+              <button data-wf203-modal="delete">Delete</button>
+              <button data-wf203-modal="close" aria-label="Close builder">x</button>
+            </div>
+          </div>
+
+          <div class="wf203-builder">
+            <section class="wf203-board-panel">
+              <div class="wf203-board-tab">Diagram</div>
+              <div class="wf203-board ${state.workflowConnectMode ? "is-connect-mode" : ""}" id="workflowBoard">
+                <svg class="wf203-lines" viewBox="0 0 560 520" preserveAspectRatio="none">
+                  <defs>
+                    <marker id="wf203Arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+                      <path d="M0,0 L0,6 L6,3 z" fill="#727b86"></path>
+                    </marker>
+                  </defs>
+                  ${lines}
+                </svg>
+                ${lineHotspots}
+                ${nodes}
+                <div class="wf203-board-tools">
+                  <button data-wf203-add-shape="condition">Decision</button>
+                  <button data-wf203-connect>Connector</button>
+                  <button data-wf203-modal="validate">Validate</button>
+                </div>
+              </div>
+            </section>
+
+            <aside class="wf203-palette">
+              <div class="wf203-palette-tabs">
+                <button class="${state.workflowSideTab === "documents" ? "is-active" : ""}" data-wf203-side-tab="documents">Documents</button>
+                <button class="${state.workflowSideTab === "connectors" ? "is-active" : ""}" data-wf203-side-tab="connectors">Logic</button>
+              </div>
+              ${
+                state.workflowSideTab === "connectors"
+                  ? `
+                    <div class="wf203-palette-body">
+                      <section class="wf203-connector-box">
+                        <h4>Connector</h4>
+                        <button data-wf203-connect>Line</button>
+                        <button data-wf203-add-shape="condition">IF / ELSE</button>
+                        <button data-wf203-modal="logic">Logic setup</button>
+                      </section>
+                      <div class="wf203-side-list">
+                        <button data-wf203-modal="logic">IF amount is greater than threshold</button>
+                        <button data-wf203-modal="logic">AND all documents completed</button>
+                        <button data-wf203-modal="logic">OR alternate approval path</button>
+                        <button data-wf203-modal="logic">ELSE return to requester</button>
+                      </div>
+                    </div>
+                  `
+                  : `
+                    <div class="wf203-palette-body">
+                      <section class="wf203-connector-box">
+                        <h4>Document Cores</h4>
+                        <button data-wf203-modal="document">Block setup</button>
+                      </section>
+                      <div class="wf203-side-list">
+                        ${documentCores
+                          .map(
+                            ([code, name, group]) => `
+                              <button data-wf203-add-doc="${escapeHtml(code)}" data-doc-name="${escapeHtml(name)}">
+                                <i></i><span>${escapeHtml(code)} - ${escapeHtml(name)}</span><small>${escapeHtml(group)}</small>
+                              </button>
+                            `
+                          )
+                          .join("")}
+                      </div>
+                    </div>
+                  `
+              }
+            </aside>
+          </div>
+        </article>
+      </div>
+      ${renderRequirementPanel(screen)}
+      ${renderWorkflowModal()}
+    </section>
+  `;
+}
 function renderApproverList(screen) {
   const status = state.approverStatus;
   const query = state.approverSearch.toLowerCase().trim();
-  const sorted = sortCards(MOCK.approverCards, state.approverSort);
+  const sorted = sortCards(MOCK.approverCards, state.approverSort).map((item, index) => ({
+    ...item,
+    owner: "Tamako",
+    updatedText: `Updated ${index + 1} hours ago`,
+    statusMeta: item.instances
+  }));
+
   const visible = sorted.filter((item) => {
     const statusOk = status === "All" || item.status === status;
     if (!statusOk) return false;
@@ -1079,27 +2114,107 @@ function renderApproverList(screen) {
     return `${item.name} ${item.status} ${item.editor}`.toLowerCase().includes(query);
   });
 
+  const statusTabs = ["All", "Published", "Draft", "On Review"]
+    .map(
+      (tab) => `
+      <button class="workflow-status-tab ${state.approverStatus === tab ? "is-active" : ""}" data-status="${escapeHtml(tab)}">${escapeHtml(tab)}</button>
+    `
+    )
+    .join("");
+
+  const rows = visible
+    .map((item) => {
+      const badgeClass =
+        item.status === "Published" ? "is-published" : item.status === "On Review" ? "is-review" : "is-draft";
+      return `
+        <article class="workflow201-row-card">
+          <div class="workflow201-row-main">
+            <h4>${escapeHtml(item.name)}</h4>
+          </div>
+          <div class="workflow201-row-status">
+            <span class="workflow201-row-badge ${badgeClass}">
+              <i aria-hidden="true">${item.status === "Published" ? "*" : item.status === "On Review" ? "?" : "o"}</i>
+              ${escapeHtml(item.status)}
+            </span>
+            <span>${escapeHtml(item.statusMeta)}</span>
+          </div>
+          <div class="workflow201-row-owner">
+            <div>
+              <strong>${escapeHtml(item.owner)}</strong>
+              <p>${escapeHtml(item.updatedText)}</p>
+            </div>
+          </div>
+          <div class="workflow201-row-actions">
+            <button data-go="SCR-212" title="Edit approver flow" aria-label="Edit approver flow">
+              <svg class="wf201-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M4 20h4l10-10-4-4L4 16v4zm3-2H6v-1l8-8 1 1-8 8zM15 4l4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
+              </svg>
+            </button>
+            <button data-toast="Approver flow duplicated to draft" title="Duplicate approver flow" aria-label="Duplicate approver flow">
+              <svg class="wf201-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="8" y="7" width="10" height="13" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"></rect>
+                <rect x="4" y="3" width="10" height="13" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"></rect>
+              </svg>
+            </button>
+            <button data-toast="Approver flow options opened" title="More options" aria-label="More options">
+              <svg class="wf201-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="12" cy="5" r="1.8" fill="currentColor"></circle>
+                <circle cx="12" cy="12" r="1.8" fill="currentColor"></circle>
+                <circle cx="12" cy="19" r="1.8" fill="currentColor"></circle>
+              </svg>
+            </button>
+          </div>
+        </article>
+      `;
+    })
+    .join("");
+
   return `
     <section class="content-grid">
       <div class="stack">
-        <article class="view-card">
-          <h3>Approver Flow Management</h3>
-          <div class="toolbar compact">
-            <label>Search
-              <input id="approverSearch" type="search" placeholder="Search approver flow name" value="${escapeHtml(state.approverSearch)}">
-            </label>
-            <label>Sort
-              <select id="approverSort">
-                <option value="newest" ${state.approverSort === "newest" ? "selected" : ""}>Newest</option>
-                <option value="oldest" ${state.approverSort === "oldest" ? "selected" : ""}>Oldest</option>
-                <option value="name" ${state.approverSort === "name" ? "selected" : ""}>A-Z</option>
-              </select>
-            </label>
-            <button class="btn-primary" data-go="SCR-212">+ New Approver Flow</button>
+        <article class="view-card workflow201-body-card">
+          <div class="workflow201-body-inner">
+            <header class="workflow201-hero">
+              <div>
+                <h2>Approver Flow Management</h2>
+                <p>Customize and manage approval paths, resolver rules, and committee routing.</p>
+              </div>
+              <button class="workflow201-create-btn" data-go="SCR-212">
+                <svg class="wf201-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
+                </svg>
+                Create Approver Flow
+              </button>
+            </header>
+
+            <div class="workflow201-tab-row" id="approverStatusPills">${statusTabs}</div>
+            <article class="workflow201-board">
+              <div class="workflow201-tools">
+                <label class="workflow201-search-box">
+                  <svg class="wf201-icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="1.8"></circle>
+                    <path d="m16.2 16.2 3.8 3.8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
+                  </svg>
+                  <input id="approverSearch" type="search" placeholder="Search approver flow..." value="${escapeHtml(state.approverSearch)}">
+                </label>
+                <label class="workflow201-sort-box">
+                  <svg class="wf201-icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M8 4v15m0 0-3-3m3 3 3-3M16 20V5m0 0-3 3m3-3 3 3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
+                  </svg>
+                  <span>Sort by : </span>
+                  <select id="approverSort">
+                    <option value="newest" ${state.approverSort === "newest" ? "selected" : ""}>Latest</option>
+                    <option value="oldest" ${state.approverSort === "oldest" ? "selected" : ""}>Oldest</option>
+                    <option value="name" ${state.approverSort === "name" ? "selected" : ""}>A-Z</option>
+                  </select>
+                </label>
+              </div>
+
+              <div class="workflow201-row-list">
+                ${rows || `<p class="workflow201-empty">No approver flows matched your filters.</p>`}
+              </div>
+            </article>
           </div>
-          ${renderStatusPills("approverStatusPills", state.approverStatus, ["All", "Published", "Draft", "On Review"])}
-          <p class="mini-note">${visible.length} approver flow cards visible.</p>
-          <div class="card-grid">${renderCards(visible)}</div>
         </article>
       </div>
       ${renderRequirementPanel(screen)}
@@ -1107,19 +2222,121 @@ function renderApproverList(screen) {
   `;
 }
 
-function renderApproverBuilder(screen) {
+function ensureApproverBuilderState() {
+  if (!Array.isArray(state.approverNodes)) {
+    state.approverNodes = [
+      { id: "start", type: "start", label: "Start", x: 230, y: 24, w: 100, h: 38 },
+      { id: "resolver", type: "resolver", label: "Role Resolver", code: "Procurement Manager", x: 196, y: 104, w: 168, h: 54 },
+      { id: "committee", type: "committee", label: "Committee Review", code: "Group B", x: 188, y: 208, w: 184, h: 58 },
+      { id: "finance", type: "approval", label: "Finance Approval", code: "Finance Dept", x: 188, y: 330, w: 184, h: 58 },
+      { id: "end", type: "end", label: "End", x: 230, y: 455, w: 100, h: 38 }
+    ];
+  }
+
+  if (!Array.isArray(state.approverLines)) {
+    state.approverLines = [
+      { id: "af-start-resolver", from: "start", to: "resolver", label: "resolve", type: "then" },
+      { id: "af-resolver-committee", from: "resolver", to: "committee", label: "all required", type: "and" },
+      { id: "af-committee-finance", from: "committee", to: "finance", label: "approved", type: "then" },
+      { id: "af-finance-end", from: "finance", to: "end", label: "complete", type: "then" }
+    ];
+  }
+
+  if (!state.approverBuilderView) state.approverBuilderView = "board";
+  if (typeof state.approverConnectMode !== "boolean") state.approverConnectMode = false;
+}
+
+function renderApproverModal() {
+  if (!state.approverActiveModal) return "";
+
+  const selectedLine = (state.approverLines || []).find((line) => line.id === state.approverSelectedLine) || state.approverLines?.[0];
+  const modalContent = {
+    step: {
+      title: "Approver Step Setup",
+      body: `
+        <div class="form-grid">
+          <label>Resolver Type<select><option>Role-based</option><option>Department Resolver</option><option>Committee</option><option>Specific User</option></select></label>
+          <label>Resolver Source<input type="text" value="Procurement Manager"></label>
+          <label>Mode<select><option>Sequential</option><option>Parallel</option><option>Alternative</option></select></label>
+          <label>Required<select><option>Yes</option><option>No</option></select></label>
+        </div>
+      `,
+      action: "Apply Step"
+    },
+    logic: {
+      title: "Approver Connector Logic",
+      body: `
+        <div class="wf203-line-context">${escapeHtml(selectedLine?.from || "source")} -> ${escapeHtml(selectedLine?.to || "target")}</div>
+        <div class="form-grid">
+          <label>Completion Rule<select><option>All required approvers</option><option>Any one approver</option><option>Majority vote</option></select></label>
+          <label>Escalation<select><option>No escalation</option><option>After due date</option><option>After SLA breach</option></select></label>
+          <label>Return Target<select><option>Requester</option><option>Previous approver</option><option>Workflow owner</option></select></label>
+          <label>Label<input type="text" value="${escapeHtml(selectedLine?.label || "approved")}"></label>
+        </div>
+      `,
+      action: "Apply Logic"
+    },
+    validate: {
+      title: "Approver Simulation Result",
+      body: `
+        <ul class="wf203-modal-list">
+          <li>Resolver source is available for all selected departments.</li>
+          <li>Committee Group B has five active members.</li>
+          <li>Completion rule does not create an approval loop.</li>
+        </ul>
+      `,
+      action: "Close"
+    },
+    publish: {
+      title: "Publish Approver Flow",
+      body: `<p>Publish this approver flow version and make it selectable in workflow builder steps.</p>`,
+      action: "Publish"
+    },
+    save: {
+      title: "Save Approver Flow Draft",
+      body: `<p>Save current resolver blocks, connector rules, and table mapping as a draft.</p>`,
+      action: "Save Draft"
+    }
+  };
+
+  const current = modalContent[state.approverActiveModal] || modalContent.step;
   return `
+    <div class="wf203-modal-backdrop" role="presentation">
+      <section class="wf203-modal" role="dialog" aria-modal="true" aria-label="${escapeHtml(current.title)}">
+        <header>
+          <h4>${escapeHtml(current.title)}</h4>
+          <button data-af-close-modal aria-label="Close modal">x</button>
+        </header>
+        <div class="wf203-modal-body">${current.body}</div>
+        <footer>
+          <button data-af-close-modal>Cancel</button>
+          <button class="btn-primary" data-af-close-modal data-toast="${escapeHtml(current.action)} completed">${escapeHtml(current.action)}</button>
+        </footer>
+      </section>
+    </div>
+  `;
+}
+
+function renderApproverBuilder(screen) {
+  ensureApproverBuilderState();
+  const currentView = state.approverBuilderView === "table" ? "table" : "board";
+  const switcher = `
+    <div class="wf203-switcher">
+      <button class="${currentView === "board" ? "is-active" : ""}" data-af-builder-view="board">Board View</button>
+      <button class="${currentView === "table" ? "is-active" : ""}" data-af-builder-view="table">Table View</button>
+    </div>
+  `;
+
+  const tableMarkup = `
     <section class="content-grid">
       <div class="stack">
-        <article class="view-card">
-          <h3>Approver Flow Builder</h3>
-          <div class="form-grid">
-            <label>Approver Flow Name
-              <input type="text" value="AF Procurement Committee">
-            </label>
-            <label>Completion Rule
-              <select><option>All Required Approvers</option><option>Any 1 Approver</option></select>
-            </label>
+        <article class="view-card wf203-card">
+          <div class="wf203-topbar">
+            <div>
+              <h3>Approver Flow Builder</h3>
+              <p>AF Procurement Committee</p>
+            </div>
+            ${switcher}
           </div>
           <div class="table-wrap">
             <table>
@@ -1140,13 +2357,138 @@ function renderApproverBuilder(screen) {
             </table>
           </div>
           <div class="action-row">
-            <button data-toast="Approver step added">+ Add Step</button>
-            <button data-toast="Approver simulation completed">Simulate</button>
-            <button class="btn-primary" data-toast="Approver flow published">Publish</button>
+            <button data-af-modal="step">+ Add Step</button>
+            <button data-af-modal="validate">Simulate</button>
+            <button class="btn-primary" data-af-modal="publish">Publish</button>
           </div>
         </article>
       </div>
       ${renderRequirementPanel(screen)}
+      ${renderApproverModal()}
+    </section>
+  `;
+
+  if (currentView === "table") return tableMarkup;
+
+  const nodesById = Object.fromEntries(state.approverNodes.map((node) => [node.id, node]));
+  const lines = state.approverLines
+    .map((line) => {
+      const linePoints = getWorkflowLinePoints(line, nodesById);
+      if (!linePoints) return "";
+      return `
+        <g class="wf203-line-group ${state.approverSelectedLine === line.id ? "is-selected" : ""}" data-af-line-id="${escapeHtml(line.id)}">
+          <polyline class="wf203-line-hit" points="${linePoints.points}" data-af-line="${escapeHtml(line.id)}"></polyline>
+          <polyline class="wf203-line" points="${linePoints.points}" marker-end="url(#afArrow)"></polyline>
+          ${line.label ? `<text x="${linePoints.labelX}" y="${linePoints.labelY - 8}" text-anchor="middle">${escapeHtml(line.label)}</text>` : ""}
+        </g>
+      `;
+    })
+    .join("");
+
+  const lineHotspots = state.approverLines
+    .map((line) => {
+      const linePoints = getWorkflowLinePoints(line, nodesById);
+      if (!linePoints) return "";
+      return `
+        <button
+          class="wf203-line-hotspot"
+          style="left:${linePoints.labelX}px; top:${linePoints.labelY}px"
+          data-af-line-hotspot="${escapeHtml(line.id)}"
+          data-af-line="${escapeHtml(line.id)}"
+          aria-label="Open approver connector logic"
+          type="button"></button>
+      `;
+    })
+    .join("");
+
+  const nodes = state.approverNodes
+    .map(
+      (node) => `
+        <button class="wf203-node is-${escapeHtml(node.type)} ${state.approverConnectFrom === node.id ? "is-connecting" : ""}"
+          style="left:${node.x}px; top:${node.y}px; width:${node.w}px; height:${node.h}px"
+          data-af-node="${escapeHtml(node.id)}"
+          type="button">
+          <span>${escapeHtml(node.label)}</span>
+          ${node.code ? `<small>${escapeHtml(node.code)}</small>` : ""}
+        </button>
+      `
+    )
+    .join("");
+
+  const sources = [
+    ["role", "Role Resolver", "Procurement Manager"],
+    ["dept", "Department Resolver", "Finance Department"],
+    ["committee", "Committee", "Committee Group B"],
+    ["user", "Specific User", "kanit.s"]
+  ];
+
+  return `
+    <section class="content-grid">
+      <div class="stack">
+        <article class="view-card wf203-card">
+          <div class="wf203-topbar">
+            <div>
+              <h3>Approver Flow Builder</h3>
+              <p>AF Procurement Committee</p>
+            </div>
+            ${switcher}
+            <div class="wf203-actions">
+              <button data-af-modal="save">Save</button>
+              <button data-af-modal="validate">Simulate</button>
+              <button data-af-modal="publish">Publish</button>
+            </div>
+          </div>
+
+          <div class="wf203-builder">
+            <section class="wf203-board-panel">
+              <div class="wf203-board-tab">Diagram</div>
+              <div class="wf203-board ${state.approverConnectMode ? "is-connect-mode" : ""}" id="approverBoard">
+                <svg class="wf203-lines" viewBox="0 0 560 520" preserveAspectRatio="none">
+                  <defs>
+                    <marker id="afArrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+                      <path d="M0,0 L0,6 L6,3 z" fill="#727b86"></path>
+                    </marker>
+                  </defs>
+                  ${lines}
+                </svg>
+                ${lineHotspots}
+                ${nodes}
+                <div class="wf203-board-tools">
+                  <button data-af-add-node="resolver">Resolver</button>
+                  <button data-af-connect>Connector</button>
+                  <button data-af-modal="validate">Validate</button>
+                </div>
+              </div>
+            </section>
+
+            <aside class="wf203-palette">
+              <div class="wf203-palette-tabs">
+                <button class="is-active">Resolvers</button>
+                <button data-af-modal="logic">Logic</button>
+              </div>
+              <div class="wf203-palette-body">
+                <section class="wf203-connector-box">
+                  <h4>Approver Sources</h4>
+                  <button data-af-modal="step">Step setup</button>
+                </section>
+                <div class="wf203-side-list">
+                  ${sources
+                    .map(
+                      ([type, label, source]) => `
+                        <button data-af-add-source="${escapeHtml(type)}" data-source-label="${escapeHtml(label)}" data-source-code="${escapeHtml(source)}">
+                          <i></i><span>${escapeHtml(label)}</span><small>${escapeHtml(source)}</small>
+                        </button>
+                      `
+                    )
+                    .join("")}
+                </div>
+              </div>
+            </aside>
+          </div>
+        </article>
+      </div>
+      ${renderRequirementPanel(screen)}
+      ${renderApproverModal()}
     </section>
   `;
 }
@@ -1346,6 +2688,17 @@ function renderMasterCatalog(screen) {
 }
 
 function generateMasterRows(screen) {
+  if (screen.id === "SCR-919") {
+    return [
+      ["MST-DEPT-001", "Office of Procurement", "2026-01-01", "Open End", "Active"],
+      ["MST-DEPT-002", "Office of Finance", "2026-01-01", "Open End", "Active"],
+      ["MST-DEPT-003", "Office of PMO", "2026-02-01", "Open End", "Active"],
+      ["MST-DEPT-004", "Office of Audit", "2026-01-01", "Open End", "Active"],
+      ["MST-DEPT-005", "Office of Legal", "2026-03-01", "2026-12-31", "Inactive"],
+      ["MST-DEPT-006", "Office of Operations", "2026-01-01", "Open End", "Active"]
+    ];
+  }
+
   const prefix = screen.id.replace("SCR-", "MST-");
   return Array.from({ length: 6 }, (_, index) => {
     const code = `${prefix}-${index + 1}`;
@@ -1412,7 +2765,7 @@ function renderMasterDataset(screen) {
   `;
 }
 
-function renderURM(screen) {
+function renderUserManagement(screen) {
   const rows = MOCK.users
     .map(
       (user) => `
@@ -1431,7 +2784,7 @@ function renderURM(screen) {
     <section class="content-grid">
       <div class="stack">
         <article class="view-card">
-          <h3>User & Role Management</h3>
+          <h3>User Management</h3>
           <div class="toolbar compact">
             <label>Search User
               <input type="search" placeholder="username or role">
@@ -1448,6 +2801,63 @@ function renderURM(screen) {
                   <th>User</th>
                   <th>Role</th>
                   <th>Department</th>
+                  <th>Status</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
+        </article>
+      </div>
+      ${renderRequirementPanel(screen)}
+    </section>
+  `;
+}
+
+function renderRoleManagement(screen) {
+  const rows = MOCK.roles
+    .map(
+      (role) => `
+      <tr>
+        <td>${escapeHtml(role.role)}</td>
+        <td>${escapeHtml(role.scope)}</td>
+        <td>${escapeHtml(String(role.users))}</td>
+        <td>${escapeHtml(role.approvalLimit)}</td>
+        <td><span class="badge ${statusToBadge(role.status)}">${escapeHtml(role.status)}</span></td>
+        <td>
+          <div class="action-row">
+            <button data-toast="Permission matrix opened">Permission Matrix</button>
+            <button data-toast="Role edit opened">Edit Role</button>
+          </div>
+        </td>
+      </tr>
+    `
+    )
+    .join("");
+
+  return `
+    <section class="content-grid">
+      <div class="stack">
+        <article class="view-card">
+          <h3>Role Management</h3>
+          <div class="toolbar compact">
+            <label>Search Role
+              <input type="search" placeholder="role name or scope">
+            </label>
+            <label>Status
+              <select><option>All</option><option>Active</option><option>Inactive</option></select>
+            </label>
+            <button class="btn-primary" data-toast="Role create form opened">+ Add Role</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Role</th>
+                  <th>Permission Scope</th>
+                  <th>Assigned Users</th>
+                  <th>Approval Limit</th>
                   <th>Status</th>
                   <th>Action</th>
                 </tr>
@@ -1710,8 +3120,10 @@ function renderScreen(screen, requestedScreen) {
       return renderMasterCatalog(screen);
     case "master-dataset":
       return renderMasterDataset(screen);
-    case "urm":
-      return renderURM(screen);
+    case "user-management":
+      return renderUserManagement(screen);
+    case "role-management":
+      return renderRoleManagement(screen);
     case "delegation":
       return renderDelegation(screen);
     case "lov":
@@ -1806,6 +3218,374 @@ function bindGlobalEvents() {
   });
 }
 
+function updateWorkflowLineDom() {
+  const board = document.getElementById("workflowBoard");
+  if (!board || !Array.isArray(state.workflowNodes) || !Array.isArray(state.workflowLines)) return;
+
+  const nodesById = Object.fromEntries(state.workflowNodes.map((node) => [node.id, node]));
+  state.workflowLines.forEach((line) => {
+    const linePoints = getWorkflowLinePoints(line, nodesById);
+    if (!linePoints) return;
+    document.querySelectorAll(`[data-line-id="${line.id}"] polyline`).forEach((polyline) => {
+      polyline.setAttribute("points", linePoints.points);
+    });
+    const label = document.querySelector(`[data-line-id="${line.id}"] text`);
+    if (label) {
+      label.setAttribute("x", String(linePoints.labelX));
+      label.setAttribute("y", String(linePoints.labelY - 8));
+    }
+    const hotspot = document.querySelector(`[data-line-hotspot="${line.id}"]`);
+    if (hotspot) {
+      hotspot.style.left = `${linePoints.labelX}px`;
+      hotspot.style.top = `${linePoints.labelY}px`;
+    }
+  });
+}
+
+function addWorkflowNode(type, label, code) {
+  ensureWorkflowBuilderState();
+  const count = state.workflowNodes.length + 1;
+  const nextNode = {
+    id: `${type}-${Date.now()}`,
+    type,
+    label,
+    code: code || "",
+    x: 80 + ((count * 38) % 300),
+    y: 80 + ((count * 46) % 300),
+    w: type === "condition" ? 118 : 140,
+    h: type === "condition" ? 82 : 54
+  };
+  state.workflowNodes.push(nextNode);
+  renderApp();
+}
+
+function bindWorkflowBuilderEvents() {
+  ensureWorkflowBuilderState();
+
+  document.querySelectorAll("[data-workflow-builder-view]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.workflowBuilderView = button.getAttribute("data-workflow-builder-view") || "board";
+      state.workflowConnectMode = false;
+      state.workflowConnectFrom = null;
+      renderApp();
+    });
+  });
+
+  document.querySelectorAll("[data-wf203-side-tab]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.workflowSideTab = button.getAttribute("data-wf203-side-tab") || "documents";
+      renderApp();
+    });
+  });
+
+  document.querySelectorAll("[data-wf203-modal]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.workflowActiveModal = button.getAttribute("data-wf203-modal") || "save";
+      renderApp();
+    });
+  });
+
+  document.querySelectorAll("[data-wf203-close-modal]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.workflowActiveModal = null;
+      renderApp();
+    });
+  });
+
+  document.querySelectorAll("[data-wf203-add-doc]").forEach((button) => {
+    button.addEventListener("click", () => {
+      addWorkflowNode("document", button.getAttribute("data-doc-name") || "Document", button.getAttribute("data-wf203-add-doc") || "");
+    });
+  });
+
+  document.querySelectorAll("[data-wf203-add-shape]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const type = button.getAttribute("data-wf203-add-shape") || "condition";
+      addWorkflowNode(type, type === "condition" ? "Condition" : "Approval", "");
+    });
+  });
+
+  document.querySelectorAll("[data-wf203-connect]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.workflowConnectMode = true;
+      state.workflowConnectFrom = null;
+      showToast("Connector mode: select the first block, then the target block.");
+      document.getElementById("workflowBoard")?.classList.add("is-connect-mode");
+    });
+  });
+
+  document.querySelectorAll("[data-wf203-line]").forEach((line) => {
+    line.addEventListener("click", () => {
+      state.workflowSelectedLine = line.getAttribute("data-wf203-line");
+      state.workflowActiveModal = "logic";
+      renderApp();
+    });
+  });
+
+  document.querySelectorAll("[data-wf203-node]").forEach((nodeElement) => {
+    nodeElement.addEventListener("click", () => {
+      if (nodeElement.dataset.dragged === "true") return;
+      const nodeId = nodeElement.getAttribute("data-wf203-node");
+      if (!nodeId) return;
+
+      if (!state.workflowConnectMode) {
+        state.workflowActiveModal = "document";
+        renderApp();
+        return;
+      }
+
+      if (state.workflowConnectFrom === null) {
+        state.workflowConnectFrom = nodeId;
+        renderApp();
+        return;
+      }
+
+      if (state.workflowConnectFrom && state.workflowConnectFrom !== nodeId) {
+        const exists = state.workflowLines.some((line) => line.from === state.workflowConnectFrom && line.to === nodeId);
+        if (!exists) {
+          state.workflowLines.push({
+            id: `line-${state.workflowConnectFrom}-${nodeId}-${Date.now()}`,
+            from: state.workflowConnectFrom,
+            to: nodeId,
+            label: "then",
+            type: "then"
+          });
+        }
+        state.workflowConnectMode = false;
+        state.workflowConnectFrom = null;
+        renderApp();
+      }
+    });
+
+    nodeElement.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      const board = document.getElementById("workflowBoard");
+      const nodeId = nodeElement.getAttribute("data-wf203-node");
+      const nodeState = state.workflowNodes.find((node) => node.id === nodeId);
+      if (!board || !nodeState) return;
+
+      const boardRect = board.getBoundingClientRect();
+      const startX = event.clientX;
+      const startY = event.clientY;
+      const offsetX = event.clientX - boardRect.left - nodeState.x;
+      const offsetY = event.clientY - boardRect.top - nodeState.y;
+      let moved = false;
+
+      nodeElement.setPointerCapture(event.pointerId);
+      nodeElement.classList.add("is-dragging");
+
+      const handleMove = (moveEvent) => {
+        const nextX = Math.max(0, Math.min(560 - nodeState.w, moveEvent.clientX - boardRect.left - offsetX));
+        const nextY = Math.max(0, Math.min(520 - nodeState.h, moveEvent.clientY - boardRect.top - offsetY));
+        moved = moved || Math.abs(moveEvent.clientX - startX) > 4 || Math.abs(moveEvent.clientY - startY) > 4;
+        nodeState.x = Math.round(nextX);
+        nodeState.y = Math.round(nextY);
+        nodeElement.style.left = `${nodeState.x}px`;
+        nodeElement.style.top = `${nodeState.y}px`;
+        updateWorkflowLineDom();
+      };
+
+      const handleUp = () => {
+        nodeElement.classList.remove("is-dragging");
+        nodeElement.dataset.dragged = moved ? "true" : "false";
+        window.setTimeout(() => {
+          nodeElement.dataset.dragged = "false";
+        }, 0);
+        nodeElement.removeEventListener("pointermove", handleMove);
+        nodeElement.removeEventListener("pointerup", handleUp);
+        nodeElement.removeEventListener("pointercancel", handleUp);
+      };
+
+      nodeElement.addEventListener("pointermove", handleMove);
+      nodeElement.addEventListener("pointerup", handleUp);
+      nodeElement.addEventListener("pointercancel", handleUp);
+    });
+  });
+}
+
+function updateApproverLineDom() {
+  const board = document.getElementById("approverBoard");
+  if (!board || !Array.isArray(state.approverNodes) || !Array.isArray(state.approverLines)) return;
+
+  const nodesById = Object.fromEntries(state.approverNodes.map((node) => [node.id, node]));
+  state.approverLines.forEach((line) => {
+    const linePoints = getWorkflowLinePoints(line, nodesById);
+    if (!linePoints) return;
+    document.querySelectorAll(`[data-af-line-id="${line.id}"] polyline`).forEach((polyline) => {
+      polyline.setAttribute("points", linePoints.points);
+    });
+    const label = document.querySelector(`[data-af-line-id="${line.id}"] text`);
+    if (label) {
+      label.setAttribute("x", String(linePoints.labelX));
+      label.setAttribute("y", String(linePoints.labelY - 8));
+    }
+    const hotspot = document.querySelector(`[data-af-line-hotspot="${line.id}"]`);
+    if (hotspot) {
+      hotspot.style.left = `${linePoints.labelX}px`;
+      hotspot.style.top = `${linePoints.labelY}px`;
+    }
+  });
+}
+
+function addApproverNode(type, label, code) {
+  ensureApproverBuilderState();
+  const count = state.approverNodes.length + 1;
+  const visualType = type === "committee" ? "committee" : type === "user" ? "approval" : "resolver";
+  const nextNode = {
+    id: `approver-${visualType}-${Date.now()}`,
+    type: visualType,
+    label,
+    code: code || "",
+    x: 68 + ((count * 44) % 330),
+    y: 76 + ((count * 52) % 330),
+    w: visualType === "committee" ? 184 : 170,
+    h: 58
+  };
+  state.approverNodes.push(nextNode);
+  renderApp();
+}
+
+function bindApproverBuilderEvents() {
+  ensureApproverBuilderState();
+
+  document.querySelectorAll("[data-af-builder-view]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.approverBuilderView = button.getAttribute("data-af-builder-view") || "board";
+      state.approverConnectMode = false;
+      state.approverConnectFrom = null;
+      renderApp();
+    });
+  });
+
+  document.querySelectorAll("[data-af-modal]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.approverActiveModal = button.getAttribute("data-af-modal") || "step";
+      renderApp();
+    });
+  });
+
+  document.querySelectorAll("[data-af-close-modal]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.approverActiveModal = null;
+      renderApp();
+    });
+  });
+
+  document.querySelectorAll("[data-af-add-node]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const type = button.getAttribute("data-af-add-node") || "resolver";
+      addApproverNode(type, type === "committee" ? "Committee Review" : "Approver Resolver", "New rule");
+    });
+  });
+
+  document.querySelectorAll("[data-af-add-source]").forEach((button) => {
+    button.addEventListener("click", () => {
+      addApproverNode(
+        button.getAttribute("data-af-add-source") || "resolver",
+        button.getAttribute("data-source-label") || "Approver Source",
+        button.getAttribute("data-source-code") || ""
+      );
+    });
+  });
+
+  document.querySelectorAll("[data-af-connect]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.approverConnectMode = true;
+      state.approverConnectFrom = null;
+      showToast("Connector mode: select the first approver block, then the target block.");
+      document.getElementById("approverBoard")?.classList.add("is-connect-mode");
+    });
+  });
+
+  document.querySelectorAll("[data-af-line]").forEach((line) => {
+    line.addEventListener("click", () => {
+      state.approverSelectedLine = line.getAttribute("data-af-line");
+      state.approverActiveModal = "logic";
+      renderApp();
+    });
+  });
+
+  document.querySelectorAll("[data-af-node]").forEach((nodeElement) => {
+    nodeElement.addEventListener("click", () => {
+      if (nodeElement.dataset.dragged === "true") return;
+      const nodeId = nodeElement.getAttribute("data-af-node");
+      if (!nodeId) return;
+
+      if (!state.approverConnectMode) {
+        state.approverActiveModal = "step";
+        renderApp();
+        return;
+      }
+
+      if (state.approverConnectFrom === null) {
+        state.approverConnectFrom = nodeId;
+        renderApp();
+        return;
+      }
+
+      if (state.approverConnectFrom && state.approverConnectFrom !== nodeId) {
+        const exists = state.approverLines.some((line) => line.from === state.approverConnectFrom && line.to === nodeId);
+        if (!exists) {
+          state.approverLines.push({
+            id: `af-line-${state.approverConnectFrom}-${nodeId}-${Date.now()}`,
+            from: state.approverConnectFrom,
+            to: nodeId,
+            label: "approved",
+            type: "then"
+          });
+        }
+        state.approverConnectMode = false;
+        state.approverConnectFrom = null;
+        renderApp();
+      }
+    });
+
+    nodeElement.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      const board = document.getElementById("approverBoard");
+      const nodeId = nodeElement.getAttribute("data-af-node");
+      const nodeState = state.approverNodes.find((node) => node.id === nodeId);
+      if (!board || !nodeState) return;
+
+      const boardRect = board.getBoundingClientRect();
+      const startX = event.clientX;
+      const startY = event.clientY;
+      const offsetX = event.clientX - boardRect.left - nodeState.x;
+      const offsetY = event.clientY - boardRect.top - nodeState.y;
+      let moved = false;
+
+      nodeElement.setPointerCapture(event.pointerId);
+      nodeElement.classList.add("is-dragging");
+
+      const handleMove = (moveEvent) => {
+        const nextX = Math.max(0, Math.min(560 - nodeState.w, moveEvent.clientX - boardRect.left - offsetX));
+        const nextY = Math.max(0, Math.min(520 - nodeState.h, moveEvent.clientY - boardRect.top - offsetY));
+        moved = moved || Math.abs(moveEvent.clientX - startX) > 4 || Math.abs(moveEvent.clientY - startY) > 4;
+        nodeState.x = Math.round(nextX);
+        nodeState.y = Math.round(nextY);
+        nodeElement.style.left = `${nodeState.x}px`;
+        nodeElement.style.top = `${nodeState.y}px`;
+        updateApproverLineDom();
+      };
+
+      const handleUp = () => {
+        nodeElement.classList.remove("is-dragging");
+        nodeElement.dataset.dragged = moved ? "true" : "false";
+        window.setTimeout(() => {
+          nodeElement.dataset.dragged = "false";
+        }, 0);
+        nodeElement.removeEventListener("pointermove", handleMove);
+        nodeElement.removeEventListener("pointerup", handleUp);
+        nodeElement.removeEventListener("pointercancel", handleUp);
+      };
+
+      nodeElement.addEventListener("pointermove", handleMove);
+      nodeElement.addEventListener("pointerup", handleUp);
+      nodeElement.addEventListener("pointercancel", handleUp);
+    });
+  });
+}
+
 function bindScreenEvents(requestedId, activeId) {
   if (activeId === "SCR-001") {
     const loginForm = document.getElementById("loginForm");
@@ -1830,6 +3610,62 @@ function bindScreenEvents(requestedId, activeId) {
         renderApp();
       });
     }
+  }
+
+  if (requestedId === "SCR-002") {
+    document.querySelectorAll("[data-status-focus]").forEach((button) => {
+      button.addEventListener("click", () => {
+        state.dashboardStatusFocus = button.getAttribute("data-status-focus") || "All";
+        renderApp();
+      });
+    });
+
+    document.querySelectorAll("[data-workload-mode]").forEach((button) => {
+      button.addEventListener("click", () => {
+        state.dashboardWorkloadMode = button.getAttribute("data-workload-mode") || "Role-Based";
+        renderApp();
+      });
+    });
+
+    document.querySelectorAll("[data-returned-focus]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const nextFocus = button.getAttribute("data-returned-focus") || "All";
+        state.dashboardReturnedFocus = nextFocus === state.dashboardReturnedFocus ? "All" : nextFocus;
+        renderApp();
+      });
+    });
+
+    document.querySelectorAll("[data-trend-period]").forEach((button) => {
+      button.addEventListener("click", () => {
+        state.dashboardTrendPeriod = button.getAttribute("data-trend-period") || "Week";
+        renderApp();
+      });
+    });
+
+    document.querySelectorAll("[data-trend-department]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const selected = button.getAttribute("data-trend-department") || "All";
+        if (selected === "All") {
+          state.dashboardTrendDepartments = ["All"];
+          renderApp();
+          return;
+        }
+
+        const nextDepartments =
+          Array.isArray(state.dashboardTrendDepartments) && state.dashboardTrendDepartments.length > 0
+            ? state.dashboardTrendDepartments.filter((item) => item !== "All")
+            : [];
+        const existingIndex = nextDepartments.indexOf(selected);
+        if (existingIndex >= 0) {
+          nextDepartments.splice(existingIndex, 1);
+        } else {
+          nextDepartments.push(selected);
+        }
+
+        state.dashboardTrendDepartments = nextDepartments.length > 0 ? nextDepartments : ["All"];
+        renderApp();
+      });
+    });
   }
 
   if (requestedId === "SCR-011") {
@@ -1876,6 +3712,14 @@ function bindScreenEvents(requestedId, activeId) {
         });
       });
     }
+  }
+
+  if (requestedId === "SCR-203") {
+    bindWorkflowBuilderEvents();
+  }
+
+  if (requestedId === "SCR-212") {
+    bindApproverBuilderEvents();
   }
 
   if (requestedId === "SCR-211") {
